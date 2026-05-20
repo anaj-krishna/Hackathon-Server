@@ -13,3 +13,4 @@ chromadb
 pypdf
 transformers
 sentencepiece
+rank-bm25
