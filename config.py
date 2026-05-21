@@ -73,6 +73,10 @@ ssl_client = httpx.Client(
     verify=False
 )
 
+ssl_async_client = httpx.AsyncClient(
+    verify=False
+)
+
 # -------------------------
 # EMBEDDINGS
 # -------------------------
@@ -81,7 +85,8 @@ embeddings = OpenAIEmbeddings(
     base_url=BASE_URL,
     model=EMBEDDING_MODEL,
     api_key=API_KEY,
-    http_client=ssl_client
+    http_client=ssl_client,
+    http_async_client=ssl_async_client
 )
 
 # -------------------------
@@ -92,7 +97,8 @@ llm = ChatOpenAI(
     base_url=BASE_URL,
     model=LLM_MODEL,
     api_key=API_KEY,
-    http_client=ssl_client
+    http_client=ssl_client,
+    http_async_client=ssl_async_client
 )
 
 # -------------------------

@@ -26,6 +26,12 @@ from config import (
 from config import client
 import uuid
 from config import local_llm
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
+from typing import Annotated, Sequence, TypedDict
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 # -----------------------------------
 # SPLITTER
 # -----------------------------------
@@ -120,7 +126,7 @@ async def process_csv(
 
     db = get_db()
 
-    db.add_texts(
+    db.add_texts(       
         texts=texts,
         metadatas=metadatas
     )
@@ -314,127 +320,181 @@ def hybrid_search(
 # CHAT
 # -----------------------------------
 
+# -----------------------------------
+# LANGGRAPH STATE & WORKFLOW
+# -----------------------------------
+
+class AgentState(TypedDict):
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    question: str
+    privacy_mode: bool
+    user_id: str
+    context: str
+    documents: list
+    answer: str
+
+def format_messages(messages):
+    formatted = []
+    for msg in messages:
+        role = "User" if isinstance(msg, HumanMessage) else "Assistant"
+        formatted.append(f"{role}: {msg.content}")
+    return "\n".join(formatted)
+
+async def condense_query_node(state: AgentState):
+    messages = state["messages"]
+    # If it is the first user query (only 1 human message in the thread), don't condense
+    if len(messages) <= 1:
+        return {
+            "question": state["question"],
+            "answer": "",
+            "context": "",
+            "documents": []
+        }
+        
+    active_llm = local_llm if state["privacy_mode"] else llm
+    
+    condense_prompt = f"""Given the following conversation history and a follow-up question, rewrite the follow-up question to be a standalone question. Keep it concise.
+
+History:
+{format_messages(messages[:-1])}
+
+Follow-up: {state["question"]}
+Standalone question:"""
+    
+    try:
+        response = await active_llm.ainvoke(condense_prompt)
+        standalone_query = response.content.strip() if hasattr(response, "content") else str(response).strip()
+        return {
+            "question": standalone_query,
+            "answer": "",
+            "context": "",
+            "documents": []
+        }
+    except Exception as e:
+        print(f"[LangGraph] Query condensation failed: {e}", flush=True)
+        return {
+            "question": state["question"],
+            "answer": "",
+            "context": "",
+            "documents": []
+        }
+
+async def retrieve_docs_node(state: AgentState):
+    db = get_db()
+    docs = hybrid_search(state["question"], db, state["user_id"])
+    
+    if not docs:
+        return {
+            "answer": "I could not find this in the uploaded documents.",
+            "context": "",
+            "documents": []
+        }
+        
+    context = ""
+    valid_docs = []
+    for doc in docs:
+        if len(context) + len(doc.page_content) > MAX_CONTEXT_CHARS:
+            break
+        context += doc.page_content + "\n\n"
+        valid_docs.append(doc)
+        
+    return {"context": context, "documents": valid_docs}
+
+async def generate_answer_node(state: AgentState):
+    if state.get("answer"):
+        return {}
+        
+    context = state["context"]
+    privacy_mode = state["privacy_mode"]
+    
+    active_llm = local_llm if privacy_mode else llm
+    
+    system_instruction = f"""You are a secure banking AI assistant.
+
+Answer ONLY from context.
+
+Context:
+{context}"""
+
+    llm_messages = [SystemMessage(content=system_instruction)] + list(state["messages"])
+    
+    try:
+        if privacy_mode:
+            print("\n===================================", flush=True)
+            print("USING LOCAL OLLAMA MODEL VIA LANGGRAPH", flush=True)
+            print(f"MODEL : {local_llm.model}", flush=True)
+            print("===================================\n", flush=True)
+        else:
+            print("\n===================================", flush=True)
+            print("USING CLOUD MODEL VIA LANGGRAPH", flush=True)
+            print(f"MODEL : {llm.model_name}", flush=True)
+            print("===================================\n", flush=True)
+            
+        response = await active_llm.ainvoke(llm_messages)
+        
+        final_answer = response.content if hasattr(response, "content") else str(response)
+        
+        print("\n=============== LLM RESPONSE ===============", flush=True)
+        print(f"ANSWERED BY   : {'Local Ollama (' + local_llm.model + ')' if privacy_mode else 'Cloud Model (' + llm.model_name + ')'}", flush=True)
+        print(final_answer, flush=True)
+        print("============================================\n", flush=True)
+        
+        return {
+            "answer": final_answer,
+            "messages": [AIMessage(content=final_answer)]
+        }
+    except Exception as e:
+        print("\n=============== ERROR ===============", flush=True)
+        print(str(e), flush=True)
+        print("=====================================\n", flush=True)
+        raise e
+
+# Build and Compile LangGraph Workflow
+workflow = StateGraph(AgentState)
+
+workflow.add_node("condense", condense_query_node)
+workflow.add_node("retrieve", retrieve_docs_node)
+workflow.add_node("generate", generate_answer_node)
+
+workflow.add_edge(START, "condense")
+workflow.add_edge("condense", "retrieve")
+workflow.add_edge("retrieve", "generate")
+workflow.add_edge("generate", END)
+
+memory = MemorySaver()
+graph = workflow.compile(checkpointer=memory)
+
+
 async def ask_question(
     question,
     user_id,
-    privacy_mode=False
+    privacy_mode=False,
+    session_id="default"
 ):
 
     print("\n================ FUNCTION STARTED ================", flush=True)
     print(f"QUESTION      : {question}", flush=True)
     print(f"USER ID       : {user_id}", flush=True)
     print(f"PRIVACY MODE  : {privacy_mode}", flush=True)
+    print(f"SESSION ID    : {session_id}", flush=True)
     print("==================================================", flush=True)
 
-    db = get_db()
-
-    # -----------------------------------
-    # HYBRID SEARCH
-    # -----------------------------------
-
-    docs = hybrid_search(
-        question,
-        db,
-        user_id
-    )
-
-    # -----------------------------------
-    # NO RESULTS
-    # -----------------------------------
-
-    if not docs:
-
-        print("\n[RAG] NO DOCUMENTS FOUND", flush=True)
-
-        return {
-            "answer": "I could not find this in the uploaded documents.",
-            "sources": []
-        }
-
-    # -----------------------------------
-    # CONTEXT BUILDING
-    # -----------------------------------
-
-    context = ""
-    valid_docs = []
-
-    for doc in docs:
-
-        if (
-            len(context) + len(doc.page_content)
-            > MAX_CONTEXT_CHARS
-        ):
-            break
-
-        context += doc.page_content + "\n\n"
-
-        valid_docs.append(doc)
-
-    # -----------------------------------
-    # PROMPT
-    # -----------------------------------
-
-    prompt = f"""
-You are a secure banking AI assistant.
-
-Answer ONLY from context.
-
-Context:
-{context}
-
-Question:
-{question}
-"""
+    config = {"configurable": {"thread_id": f"{user_id}:{session_id}"}}
 
     try:
-
-        # -----------------------------------
-        # LOCAL LLM
-        # -----------------------------------
-
-        if privacy_mode:
-
-            print("\n===================================", flush=True)
-            print("USING LOCAL OLLAMA MODEL", flush=True)
-            print(f"MODEL : {local_llm.model}", flush=True)
-            print("===================================\n", flush=True)
-
-            response = local_llm.invoke(prompt)
-
-        # -----------------------------------
-        # CLOUD LLM
-        # -----------------------------------
-
-        else:
-
-            print("\n===================================", flush=True)
-            print("USING CLOUD MODEL", flush=True)
-            print(f"MODEL : {llm.model_name}", flush=True)
-            print("===================================\n", flush=True)
-
-            response = llm.invoke(prompt)
-
-        # -----------------------------------
-        # RESPONSE PRINT
-        # -----------------------------------
-
-        print("\n=============== LLM RESPONSE ===============", flush=True)
-        print(f"ANSWERED BY   : {'Local Ollama (' + local_llm.model + ')' if privacy_mode else 'Cloud Model (' + llm.model_name + ')'}", flush=True)
-
-        if hasattr(response, "content"):
-
-            print(response.content, flush=True)
-
-            final_answer = response.content
-
-        else:
-
-            print(response, flush=True)
-
-            final_answer = str(response)
-
-        print("============================================\n", flush=True)
-
+        result = await graph.ainvoke(
+            {
+                "messages": [HumanMessage(content=question)],
+                "question": question,
+                "privacy_mode": privacy_mode,
+                "user_id": user_id,
+            },
+            config=config
+        )
+        
+        valid_docs = result.get("documents", [])
+        final_answer = result.get("answer", "I could not find this in the uploaded documents.")
+        
         return {
             "answer": final_answer,
             "sources": [
