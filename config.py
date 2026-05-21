@@ -1,12 +1,9 @@
 import os
 import ssl
 import httpx
+import sqlite3
 
 from dotenv import load_dotenv
-
-from motor.motor_asyncio import (
-    AsyncIOMotorClient
-)
 
 from langchain_openai import (
     OpenAIEmbeddings,
@@ -29,36 +26,42 @@ ssl._create_default_https_context = (
 
 API_KEY = os.getenv("OPENAI_API_KEY")
 
-MONGO_URL = os.getenv("MONGO_URL")
-
-JWT_SECRET = os.getenv("JWT_SECRET")
+# MONGO_URL not needed anymore
+JWT_SECRET = os.getenv("JWT_SECRET", "mysecretkey")
 
 BASE_URL = "https://genailab.tcs.in"
 
-EMBEDDING_MODEL = (
-    "azure/genailab-maas-text-embedding-3-large"
-)
-
-LLM_MODEL = (
-    "azure_ai/genailab-maas-DeepSeek-V3-0324"
-)
+EMBEDDING_MODEL = "azure/genailab-maas-text-embedding-3-large"
+LLM_MODEL = "azure_ai/genailab-maas-DeepSeek-V3-0324"
 
 CHROMA_DIR = "./chroma_db"
 
 # -------------------------
-# MONGO
+# SQLITE DB SETUP
 # -------------------------
 
-mongo_client = None
-mongo_db = None
+SQLITE_DB_PATH = "users.db"
 
-if MONGO_URL:
+def init_db():
+    conn = sqlite3.connect(SQLITE_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-    mongo_client = AsyncIOMotorClient(
-        MONGO_URL
-    )
+# Create table
+init_db()
 
-    mongo_db = mongo_client["rag_db"]
+def get_db_connection():
+    conn = sqlite3.connect(SQLITE_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 # -------------------------
 # HTTP CLIENT

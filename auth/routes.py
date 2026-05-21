@@ -1,9 +1,10 @@
 from fastapi import (
     APIRouter,
-    HTTPException
+    HTTPException,
+    Depends
 )
-
-from config import mongo_db
+from fastapi.security import OAuth2PasswordRequestForm
+from config import get_db_connection
 
 from auth.security import (
     hash_password,
@@ -25,79 +26,67 @@ async def register(
     email: str,
     password: str
 ):
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-    if mongo_db is None:
-
-        raise HTTPException(
-            status_code=500,
-            detail="MongoDB is not configured"
-        )
-
-    existing_user = await mongo_db.users.find_one({
-        "email": email
-    })
+    # Check if user already exists
+    cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
+    existing_user = cursor.fetchone()
 
     if existing_user:
-
+        conn.close()
         raise HTTPException(
             status_code=400,
             detail="User already exists"
         )
+    
+    hashed_password = hash_password(password)
 
-    hashed_password = hash_password(
-        password
+    # Insert user
+    cursor.execute(
+        "INSERT INTO users (email, password) VALUES (?, ?)", 
+        (email, hashed_password)
     )
-
-    result = await mongo_db.users.insert_one({
-        "email": email,
-        "password": hashed_password
-    })
+    conn.commit()
+    user_id = cursor.lastrowid
+    conn.close()
 
     return {
         "message": "User created",
-        "user_id": str(result.inserted_id)
+        "user_id": str(user_id)
     }
 
 # -------------------------
-# LOGIN
+# LOGIN (SWAGGER COMPATIBLE)
 # -------------------------
 
 @router.post("/login")
 async def login(
-    email: str,
-    password: str
+    form_data: OAuth2PasswordRequestForm = Depends()
 ):
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-    if mongo_db is None:
-
-        raise HTTPException(
-            status_code=500,
-            detail="MongoDB is not configured"
-        )
-
-    user = await mongo_db.users.find_one({
-        "email": email
-    })
+    # form_data.username will contain the provided email
+    cursor.execute("SELECT * FROM users WHERE email = ?", (form_data.username,))
+    user = cursor.fetchone()
+    conn.close()
 
     if not user:
-
         raise HTTPException(
             status_code=401,
             detail="Invalid credentials"
         )
 
-    if not verify_password(
-        password,
-        user["password"]
-    ):
-
+    # Note: user["password"] works because of conn.row_factory = sqlite3.Row in config
+    if not verify_password(form_data.password, user["password"]):
         raise HTTPException(
             status_code=401,
             detail="Invalid credentials"
         )
 
     token = create_access_token({
-        "sub": str(user["_id"])
+        "sub": str(user["id"])
     })
 
     return {

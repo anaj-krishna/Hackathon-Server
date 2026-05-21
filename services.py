@@ -425,43 +425,43 @@ Question:
 # VOICE QUERY
 # -----------------------------------
 
-async def process_voice_query(
-    file,
-    user_id
-):
+# async def process_voice_query(
+#     file,
+#     user_id
+# ):
 
-    temp_filename=f"temp_{uuid.uuid4()}.webm"
+#     temp_filename=f"temp_{uuid.uuid4()}.webm"
 
-    with open(temp_filename,"wb") as f:
+#     with open(temp_filename,"wb") as f:
 
-        content=await file.read()
+#         content=await file.read()
 
-        f.write(content)
+#         f.write(content)
 
-    try:
+#     try:
 
-        with open(temp_filename,"rb") as audio_file:
+#         with open(temp_filename,"rb") as audio_file:
 
-            transcript=client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file
-            )
+#             transcript=client.audio.transcriptions.create(
+#                 model="whisper-1",
+#                 file=audio_file
+#             )
 
-        question=transcript.text
+#         question=transcript.text
 
-        print(f"\n[VOICE TRANSCRIPT]: {question}")
+#         print(f"\n[VOICE TRANSCRIPT]: {question}")
 
-        result=await ask_question(
-            question,
-            user_id
-        )
+#         result=await ask_question(
+#             question,
+#             user_id
+#         )
 
-        result["transcript"]=question
+#         result["transcript"]=question
 
-        return result
+#         return result
 
-    finally:
+#     finally:
 
-        if os.path.exists(temp_filename):
+#         if os.path.exists(temp_filename):
 
-            os.remove(temp_filename)
+#             os.remove(temp_filename)
