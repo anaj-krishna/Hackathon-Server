@@ -15,3 +15,4 @@ rank-bm25
 motor
 passlib[bcrypt]
 python-jose[cryptography]
+langchain-ollama

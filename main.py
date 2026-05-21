@@ -125,6 +125,7 @@ async def chat(
 
     return await ask_question(
         payload.question,
-        user_id
+        user_id,
+        payload.privacy_mode
     )
 

@@ -14,6 +14,8 @@ from langchain_community.vectorstores import (
 )
 from openai import OpenAI
 
+from langchain_ollama import ChatOllama
+local_llm = ChatOllama(model="deepseek-r1")
 # -------------------------
 # ENV
 # -------------------------

@@ -1,4 +1,5 @@
-#schemas.py
+# schemas.py
+
 from pydantic import BaseModel
 
 class TextRequest(BaseModel):
@@ -6,3 +7,4 @@ class TextRequest(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
+    privacy_mode: bool = False

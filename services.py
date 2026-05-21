@@ -25,6 +25,7 @@ from config import (
 )
 from config import client
 import uuid
+from config import local_llm
 # -----------------------------------
 # SPLITTER
 # -----------------------------------
@@ -315,8 +316,15 @@ def hybrid_search(
 
 async def ask_question(
     question,
-    user_id
+    user_id,
+    privacy_mode=False
 ):
+
+    print("\n================ FUNCTION STARTED ================", flush=True)
+    print(f"QUESTION      : {question}", flush=True)
+    print(f"USER ID       : {user_id}", flush=True)
+    print(f"PRIVACY MODE  : {privacy_mode}", flush=True)
+    print("==================================================", flush=True)
 
     db = get_db()
 
@@ -335,7 +343,9 @@ async def ask_question(
     # -----------------------------------
 
     if not docs:
-        print("\n[RAG DIAGNOSTIC] No documents retrieved from hybrid_search.")
+
+        print("\n[RAG] NO DOCUMENTS FOUND", flush=True)
+
         return {
             "answer": "I could not find this in the uploaded documents.",
             "sources": []
@@ -357,11 +367,8 @@ async def ask_question(
             break
 
         context += doc.page_content + "\n\n"
-        valid_docs.append(doc)
 
-    if not context and docs:
-        context = docs[0].page_content + "\n\n"
-        valid_docs.append(docs[0])
+        valid_docs.append(doc)
 
     # -----------------------------------
     # PROMPT
@@ -370,12 +377,7 @@ async def ask_question(
     prompt = f"""
 You are a secure banking AI assistant.
 
-Rules:
-- Answer ONLY from provided context
-- Do NOT hallucinate
-- Do NOT generate financial advice outside context
-- If answer unavailable, clearly say so
-- Keep responses concise and factual
+Answer ONLY from context.
 
 Context:
 {context}
@@ -384,84 +386,67 @@ Question:
 {question}
 """
 
-    # -----------------------------------
-    # LLM EXECUTION & DIAGNOSTIC PRINT
-    # -----------------------------------
-    print(f"\n======== [RAG DIAGNOSTIC START] ========")
-    print(f"User ID: {user_id}")
-    print(f"User Question: {question}")
-    print(f"Number of Context Chunks Sent to LLM: {len(valid_docs)}")
-    print("=========================================")
-
     try:
-        response = llm.invoke(prompt)
-        
-        # This will print the raw text answer directly in your terminal window
-        print(f"\n[LLM SUCCESS RESPONSE]:\n{response.content}")
-        print(f"=========================================\n")
+
+        # -----------------------------------
+        # LOCAL LLM
+        # -----------------------------------
+
+        if privacy_mode:
+
+            print("\n===================================", flush=True)
+            print("USING LOCAL OLLAMA MODEL", flush=True)
+            print(f"MODEL : {local_llm.model}", flush=True)
+            print("===================================\n", flush=True)
+
+            response = local_llm.invoke(prompt)
+
+        # -----------------------------------
+        # CLOUD LLM
+        # -----------------------------------
+
+        else:
+
+            print("\n===================================", flush=True)
+            print("USING CLOUD MODEL", flush=True)
+            print(f"MODEL : {llm.model_name}", flush=True)
+            print("===================================\n", flush=True)
+
+            response = llm.invoke(prompt)
+
+        # -----------------------------------
+        # RESPONSE PRINT
+        # -----------------------------------
+
+        print("\n=============== LLM RESPONSE ===============", flush=True)
+        print(f"ANSWERED BY   : {'Local Ollama (' + local_llm.model + ')' if privacy_mode else 'Cloud Model (' + llm.model_name + ')'}", flush=True)
+
+        if hasattr(response, "content"):
+
+            print(response.content, flush=True)
+
+            final_answer = response.content
+
+        else:
+
+            print(response, flush=True)
+
+            final_answer = str(response)
+
+        print("============================================\n", flush=True)
 
         return {
-            "answer": response.content,
+            "answer": final_answer,
             "sources": [
                 doc.metadata
                 for doc in valid_docs
             ]
         }
-        
+
     except Exception as e:
-        error_str = str(e)
-        print(f"\n[LLM CRITICAL ERROR]: {str(e)}")
-        print(f"=========================================\n")
-        if "403" in error_str or "Content blocked" in error_str:
-            return {
-                "answer": "⚠️ This query was blocked by the content filter. The retrieved document chunks may contain restricted keywords. Try rephrasing your question.",
-                "sources": []
-            }
+
+        print("\n=============== ERROR ===============", flush=True)
+        print(str(e), flush=True)
+        print("=====================================\n", flush=True)
 
         raise e
-    
-
-# -----------------------------------
-# VOICE QUERY
-# -----------------------------------
-
-# async def process_voice_query(
-#     file,
-#     user_id
-# ):
-
-#     temp_filename=f"temp_{uuid.uuid4()}.webm"
-
-#     with open(temp_filename,"wb") as f:
-
-#         content=await file.read()
-
-#         f.write(content)
-
-#     try:
-
-#         with open(temp_filename,"rb") as audio_file:
-
-#             transcript=client.audio.transcriptions.create(
-#                 model="whisper-1",
-#                 file=audio_file
-#             )
-
-#         question=transcript.text
-
-#         print(f"\n[VOICE TRANSCRIPT]: {question}")
-
-#         result=await ask_question(
-#             question,
-#             user_id
-#         )
-
-#         result["transcript"]=question
-
-#         return result
-
-#     finally:
-
-#         if os.path.exists(temp_filename):
-
-#             os.remove(temp_filename)
