@@ -11,6 +11,7 @@ langchain-text-splitters
 
 chromadb
 pypdf
-transformers
-sentencepiece
 rank-bm25
+motor
+passlib[bcrypt]
+python-jose[cryptography]

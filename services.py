@@ -42,7 +42,7 @@ MAX_CONTEXT_CHARS = 12000
 
 async def process_pdf(
     file,
-    session_id
+    user_id
 ):
 
     with tempfile.NamedTemporaryFile(
@@ -68,11 +68,11 @@ async def process_pdf(
 
         doc.metadata.update({
             "source": file.filename,
-            "session_id": session_id,
+            "user_id": user_id,
             "type": "pdf"
         })
 
-    db = get_db(session_id)
+    db = get_db()
 
     db.add_documents(split_docs)
 
@@ -86,7 +86,7 @@ async def process_pdf(
 
 async def process_csv(
     file,
-    session_id
+    user_id
 ):
 
     content = await file.read()
@@ -112,12 +112,12 @@ async def process_csv(
 
         metadatas.append({
             "row": index,
-            "session_id": session_id,
+            "user_id": user_id,
             "source": file.filename,
             "type": "csv"
         })
 
-    db = get_db(session_id)
+    db = get_db()
 
     db.add_texts(
         texts=texts,
@@ -132,17 +132,17 @@ async def process_csv(
 
 async def process_text(
     text,
-    session_id
+    user_id
 ):
 
     chunks = splitter.split_text(text)
 
     metadatas = [{
-        "session_id": session_id,
+        "user_id": user_id,
         "type": "text"
     } for _ in chunks]
 
-    db = get_db(session_id)
+    db = get_db()
 
     db.add_texts(
         texts=chunks,
@@ -158,7 +158,7 @@ async def process_text(
 def hybrid_search(
     question,
     db,
-    session_id
+    user_id
 ):
 
     # -----------------------------------
@@ -167,7 +167,10 @@ def hybrid_search(
 
     vector_results = db.similarity_search_with_score(
         question,
-        k=4
+        k=4,
+        filter={
+            "user_id": user_id
+        }
     )
 
     vector_docs = []
@@ -185,7 +188,7 @@ def hybrid_search(
 
     all_docs = db.get(
         where={
-            "session_id": session_id
+            "user_id": user_id
         }
     )
 
@@ -305,105 +308,17 @@ def hybrid_search(
 
     return final_docs[:6]
 
-# -----------------------------------
-# CHAT
-# -----------------------------------
 
-# async def ask_question(
-#     question,
-#     session_id
-# ):
-
-#     db = get_db(session_id)
-
-#     docs = hybrid_search(
-#         question,
-#         db,
-#         session_id
-#     )
-
-#     # -----------------------------------
-#     # NO RESULTS
-#     # -----------------------------------
-
-#     if not docs:
-
-#         return {
-#             "answer": "I could not find this in the uploaded documents.",
-#             "sources": []
-#         }
-
-#     # -----------------------------------
-#     # CONTEXT BUILDING
-#     # -----------------------------------
-
-#     context = ""
-#     valid_docs = []
-
-#     for doc in docs:
-
-#         if (
-#             len(context) + len(doc.page_content)
-#             > MAX_CONTEXT_CHARS
-#         ):
-#             break
-
-#         context += doc.page_content + "\n\n"
-#         valid_docs.append(doc)
-
-#     # Secondary safety fallback if context checks trimmed absolutely everything
-#     if not context and docs:
-#         context = docs[0].page_content + "\n\n"
-#         valid_docs.append(docs[0])
-
-#     # -----------------------------------
-#     # PROMPT
-#     # -----------------------------------
-
-#     prompt = f"""
-# You are a secure banking AI assistant.
-
-# Rules:
-# - Answer ONLY from provided context
-# - Do NOT hallucinate
-# - Do NOT generate financial advice outside context
-# - If answer unavailable, clearly say so
-# - Keep responses concise and factual
-
-# Context:
-# {context}
-
-# Question:
-# {question}
-# """
-
-#     # -----------------------------------
-#     # LLM
-#     # -----------------------------------
-
-#     response = llm.invoke(prompt)
-
-#     # -----------------------------------
-#     # RETURN
-#     # -----------------------------------
-
-#     return {
-#         "answer": response.content,
-#         "sources": [
-#             doc.metadata
-#             for doc in valid_docs
-#         ]
-#     }
 # -----------------------------------
 # CHAT
 # -----------------------------------
 
 async def ask_question(
     question,
-    session_id
+    user_id
 ):
 
-    db = get_db(session_id)
+    db = get_db()
 
     # -----------------------------------
     # HYBRID SEARCH
@@ -412,7 +327,7 @@ async def ask_question(
     docs = hybrid_search(
         question,
         db,
-        session_id
+        user_id
     )
 
     # -----------------------------------
@@ -473,7 +388,7 @@ Question:
     # LLM EXECUTION & DIAGNOSTIC PRINT
     # -----------------------------------
     print(f"\n======== [RAG DIAGNOSTIC START] ========")
-    print(f"Session ID: {session_id}")
+    print(f"User ID: {user_id}")
     print(f"User Question: {question}")
     print(f"Number of Context Chunks Sent to LLM: {len(valid_docs)}")
     print("=========================================")
@@ -512,7 +427,7 @@ Question:
 
 async def process_voice_query(
     file,
-    session_id
+    user_id
 ):
 
     temp_filename=f"temp_{uuid.uuid4()}.webm"
@@ -538,7 +453,7 @@ async def process_voice_query(
 
         result=await ask_question(
             question,
-            session_id
+            user_id
         )
 
         result["transcript"]=question

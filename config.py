@@ -4,6 +4,10 @@ import httpx
 
 from dotenv import load_dotenv
 
+from motor.motor_asyncio import (
+    AsyncIOMotorClient
+)
+
 from langchain_openai import (
     OpenAIEmbeddings,
     ChatOpenAI
@@ -25,6 +29,10 @@ ssl._create_default_https_context = (
 
 API_KEY = os.getenv("OPENAI_API_KEY")
 
+MONGO_URL = os.getenv("MONGO_URL")
+
+JWT_SECRET = os.getenv("JWT_SECRET")
+
 BASE_URL = "https://genailab.tcs.in"
 
 EMBEDDING_MODEL = (
@@ -36,6 +44,21 @@ LLM_MODEL = (
 )
 
 CHROMA_DIR = "./chroma_db"
+
+# -------------------------
+# MONGO
+# -------------------------
+
+mongo_client = None
+mongo_db = None
+
+if MONGO_URL:
+
+    mongo_client = AsyncIOMotorClient(
+        MONGO_URL
+    )
+
+    mongo_db = mongo_client["rag_db"]
 
 # -------------------------
 # HTTP CLIENT
@@ -71,10 +94,10 @@ llm = ChatOpenAI(
 # VECTOR DB
 # -------------------------
 
-def get_db(session_id: str):
+def get_db():
 
     return Chroma(
-        collection_name=f"session_{session_id}",
+        collection_name="documents",
         embedding_function=embeddings,
         persist_directory=CHROMA_DIR
     )
