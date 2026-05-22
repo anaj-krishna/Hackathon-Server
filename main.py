@@ -18,6 +18,7 @@ from services import (
     process_pdf,
     process_csv,
     process_text,
+    process_requirement_json,
     ask_question,
     # process_voice_query
 )
@@ -114,6 +115,24 @@ async def ingest_text(
     }
 
 # -------------------------
+# JSON INGEST
+# -------------------------
+
+@app.post("/api/ingest/json")
+async def ingest_json(
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_current_user)
+):
+    import json
+    content = await file.read()
+    data = json.loads(content.decode("utf-8"))
+    count = await process_requirement_json(data, user_id)
+    return {
+        "status": "success",
+        "chunks": count
+    }
+
+# -------------------------
 # CHAT
 # -------------------------
 
@@ -127,7 +146,8 @@ async def chat(
         payload.question,
         user_id,
         payload.privacy_mode,
-        payload.session_id
+        payload.session_id,
+        payload.domain
     )
 
     

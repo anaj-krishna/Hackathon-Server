@@ -159,25 +159,94 @@ async def process_text(
     return len(chunks)
 
 # -----------------------------------
+# REQUIREMENT JSON INGEST
+# -----------------------------------
+
+async def process_requirement_json(
+    data,
+    user_id
+):
+    if isinstance(data, dict):
+        records = [data]
+    elif isinstance(data, list):
+        records = data
+    else:
+        raise ValueError("Invalid data format for requirement json")
+
+    docs = []
+    for record in records:
+        req_id = record.get("id") or record.get("requirement_id")
+        domain = record.get("domain", "")
+        subdomain = record.get("subdomain", "")
+        raw_requirement = record.get("raw_requirement", "")
+        ambiguities = record.get("ambiguities", [])
+        clarification_questions = record.get("clarification_questions", [])
+        user_clarifications = record.get("user_clarifications", [])
+        refined_summary = record.get("refined_summary", "")
+
+        content_parts = [
+            f"Requirement ID: {req_id}",
+            f"Domain: {domain}",
+            f"Subdomain: {subdomain}",
+            f"Raw Requirement: {raw_requirement}"
+        ]
+        if ambiguities:
+            content_parts.append("Ambiguities:\n" + "\n".join(f"- {a}" for a in ambiguities))
+        if clarification_questions:
+            content_parts.append("Clarification Questions:\n" + "\n".join(f"- {q}" for q in clarification_questions))
+        if user_clarifications:
+            content_parts.append("User Clarifications:\n" + "\n".join(f"- {c}" for c in user_clarifications))
+        if refined_summary:
+            content_parts.append(f"Refined Summary: {refined_summary}")
+
+        page_content = "\n\n".join(content_parts)
+
+        doc = Document(
+            page_content=page_content,
+            metadata={
+                "domain": domain,
+                "subdomain": subdomain,
+                "requirement_id": str(req_id),
+                "user_id": user_id,
+                "type": "requirement"
+            }
+        )
+        docs.append(doc)
+
+    db = get_db()
+    db.add_documents(docs)
+
+    return len(docs)
+
+# -----------------------------------
 # HYBRID SEARCH
 # -----------------------------------
 
 def hybrid_search(
     question,
     db,
-    user_id
+    user_id,
+    domain=None
 ):
 
     # -----------------------------------
     # VECTOR SEARCH
     # -----------------------------------
 
+    if domain:
+        filter_dict = {
+            "$and": [
+                {"user_id": user_id},
+                {"domain": domain}
+            ]
+        }
+    else:
+        filter_dict = {"user_id": user_id}
+
     vector_results = db.similarity_search_with_score(
         question,
         k=4,
-        filter={
-            "user_id": user_id
-        }
+        filter=filter_dict
     )
 
     vector_docs = []
@@ -193,10 +262,17 @@ def hybrid_search(
     # LOAD SESSION DOCS
     # -----------------------------------
 
-    all_docs = db.get(
-        where={
-            "user_id": user_id
+    where_dict = {"user_id": user_id}
+    if domain:
+        where_dict = {
+            "$and": [
+                {"user_id": user_id},
+                {"domain": domain}
+            ]
         }
+
+    all_docs = db.get(
+        where=where_dict
     )
 
     raw_docs = all_docs.get(
@@ -332,6 +408,10 @@ class AgentState(TypedDict):
     context: str
     documents: list
     answer: str
+    domain: str
+    ambiguities: list
+    clarification_questions: list
+    refined_requirement: str
 
 def format_messages(messages):
     formatted = []
@@ -348,7 +428,10 @@ async def condense_query_node(state: AgentState):
             "question": state["question"],
             "answer": "",
             "context": "",
-            "documents": []
+            "documents": [],
+            "ambiguities": [],
+            "clarification_questions": [],
+            "refined_requirement": ""
         }
         
     active_llm = local_llm if state["privacy_mode"] else llm
@@ -368,7 +451,10 @@ Standalone question:"""
             "question": standalone_query,
             "answer": "",
             "context": "",
-            "documents": []
+            "documents": [],
+            "ambiguities": [],
+            "clarification_questions": [],
+            "refined_requirement": ""
         }
     except Exception as e:
         print(f"[LangGraph] Query condensation failed: {e}", flush=True)
@@ -376,68 +462,213 @@ Standalone question:"""
             "question": state["question"],
             "answer": "",
             "context": "",
-            "documents": []
+            "documents": [],
+            "ambiguities": [],
+            "clarification_questions": [],
+            "refined_requirement": ""
         }
 
 async def retrieve_docs_node(state: AgentState):
     db = get_db()
-    docs = hybrid_search(state["question"], db, state["user_id"])
+    docs = hybrid_search(state["question"], db, state["user_id"], state.get("domain"))
     
-    if not docs:
-        return {
-            "answer": "I could not find this in the uploaded documents.",
-            "context": "",
-            "documents": []
-        }
-        
     context = ""
     valid_docs = []
-    for doc in docs:
-        if len(context) + len(doc.page_content) > MAX_CONTEXT_CHARS:
-            break
-        context += doc.page_content + "\n\n"
-        valid_docs.append(doc)
+    if docs:
+        for doc in docs:
+            if len(context) + len(doc.page_content) > MAX_CONTEXT_CHARS:
+                break
+            context += doc.page_content + "\n\n"
+            valid_docs.append(doc)
         
     return {"context": context, "documents": valid_docs}
 
-async def generate_answer_node(state: AgentState):
-    if state.get("answer"):
-        return {}
-        
-    context = state["context"]
+async def ambiguity_detection_node(state: AgentState):
     privacy_mode = state["privacy_mode"]
-    
     active_llm = local_llm if privacy_mode else llm
     
-    system_instruction = f"""You are a secure banking AI assistant.
+    history = format_messages(state["messages"])
+    domain = state.get("domain", "")
+    
+    prompt = f"""You are a professional Business Analyst. Analyze the following requirement and conversation history to identify ambiguities, gaps, missing details, or unclear business rules.
 
-Answer ONLY from context.
+Domain: {domain}
+Requirement/Conversation:
+{history}
 
-Context:
-{context}"""
+Identify all ambiguities. List them clearly.
+Format your output as a JSON list of strings. Do not include markdown code block formatting or any explanation outside the JSON list.
+Example output format:
+[
+  "The payment methods are not specified.",
+  "The response time SLA is undefined."
+]
+"""
+    try:
+        response = await active_llm.ainvoke(prompt)
+        content = response.content.strip() if hasattr(response, "content") else str(response).strip()
+        
+        # strip codeblocks if present
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            content = "\n".join(lines).strip()
+            
+        import json
+        ambiguities = json.loads(content)
+        if not isinstance(ambiguities, list):
+            ambiguities = [content]
+    except Exception as e:
+        print(f"[LangGraph] Ambiguity detection failed: {e}", flush=True)
+        ambiguities = ["Requirement detail is ambiguous or needs clarification."]
+        
+    return {"ambiguities": ambiguities}
 
+async def clarification_generation_node(state: AgentState):
+    privacy_mode = state["privacy_mode"]
+    active_llm = local_llm if privacy_mode else llm
+    
+    ambiguities = state.get("ambiguities", [])
+    context = state.get("context", "")
+    domain = state.get("domain", "")
+    
+    if not ambiguities:
+        return {"clarification_questions": []}
+        
+    prompt = f"""You are a professional Business Analyst. Generate clear, actionable clarification questions to resolve the identified ambiguities.
+Use the retrieved reference context (which contains templates or similar requirements) to align the questions with best practices in this domain.
+
+Domain: {domain}
+Identified Ambiguities:
+{chr(10).join(f"- {a}" for a in ambiguities)}
+
+Retrieved Reference Context:
+{context}
+
+Format your output as a JSON list of strings (questions). Do not include markdown code block formatting or any explanation outside the JSON list.
+Example output format:
+[
+  "Which payment methods should be supported?",
+  "What is the expected response time?"
+]
+"""
+    try:
+        response = await active_llm.ainvoke(prompt)
+        content = response.content.strip() if hasattr(response, "content") else str(response).strip()
+        
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            content = "\n".join(lines).strip()
+            
+        import json
+        questions = json.loads(content)
+        if not isinstance(questions, list):
+            questions = [content]
+    except Exception as e:
+        print(f"[LangGraph] Clarification question generation failed: {e}", flush=True)
+        questions = ["Can you please clarify the specific requirements for this module?"]
+        
+    return {"clarification_questions": questions}
+
+async def refinement_node(state: AgentState):
+    privacy_mode = state["privacy_mode"]
+    active_llm = local_llm if privacy_mode else llm
+    
+    history = format_messages(state["messages"])
+    context = state.get("context", "")
+    domain = state.get("domain", "")
+    
+    prompt = f"""You are a professional Business Analyst. Combine the original requirements, user's clarifications from the conversation, and retrieved reference examples to compile a refined, professional business requirement summary.
+
+Domain: {domain}
+Conversation History (containing requirements and clarifications):
+{history}
+
+Retrieved Reference Context:
+{context}
+
+Generate a clear, structured, and professional business requirement summary. Outline the refined scope and details.
+"""
+    try:
+        response = await active_llm.ainvoke(prompt)
+        refined_requirement = response.content.strip() if hasattr(response, "content") else str(response).strip()
+    except Exception as e:
+        print(f"[LangGraph] Refinement failed: {e}", flush=True)
+        refined_requirement = "Incomplete requirement; awaiting user clarification."
+        
+    return {"refined_requirement": refined_requirement}
+
+async def generate_answer_node(state: AgentState):
+    context = state.get("context", "")
+    privacy_mode = state["privacy_mode"]
+    active_llm = local_llm if privacy_mode else llm
+    
+    ambiguities = state.get("ambiguities", [])
+    questions = state.get("clarification_questions", [])
+    refined_req = state.get("refined_requirement", "")
+    domain = state.get("domain", "")
+    
+    system_instruction = f"""You are an AI business analyst assistant.
+
+Your responsibilities:
+- detect ambiguities
+- ask clarification questions
+- refine incomplete business requirements
+- generate professional summaries
+
+Use retrieved context when available.
+
+Domain: {domain}
+Retrieved Reference Context:
+{context}
+
+Current state of analysis:
+- Detected Ambiguities: {ambiguities}
+- Clarification Questions: {questions}
+- Refined Requirement Summary: {refined_req}
+
+Formulate a professional and structured response. 
+1. Present the detected ambiguities clearly.
+2. Ask the generated clarification questions to the user.
+3. Show the current refined requirement summary.
+Maintain a helpful and structured business analyst tone.
+"""
     llm_messages = [SystemMessage(content=system_instruction)] + list(state["messages"])
     
     try:
-        if privacy_mode:
-            print("\n===================================", flush=True)
-            print("USING LOCAL OLLAMA MODEL VIA LANGGRAPH", flush=True)
-            print(f"MODEL : {local_llm.model}", flush=True)
-            print("===================================\n", flush=True)
-        else:
-            print("\n===================================", flush=True)
-            print("USING CLOUD MODEL VIA LANGGRAPH", flush=True)
-            print(f"MODEL : {llm.model_name}", flush=True)
-            print("===================================\n", flush=True)
+        try:
+            if privacy_mode:
+                print("\n===================================", flush=True)
+                print("USING LOCAL OLLAMA MODEL VIA LANGGRAPH", flush=True)
+                print(f"MODEL : {local_llm.model}", flush=True)
+                print("===================================\n", flush=True)
+            else:
+                print("\n===================================", flush=True)
+                print("USING CLOUD MODEL VIA LANGGRAPH", flush=True)
+                print(f"MODEL : {llm.model_name}", flush=True)
+                print("===================================\n", flush=True)
+        except Exception:
+            pass
             
         response = await active_llm.ainvoke(llm_messages)
-        
         final_answer = response.content if hasattr(response, "content") else str(response)
         
-        print("\n=============== LLM RESPONSE ===============", flush=True)
-        print(f"ANSWERED BY   : {'Local Ollama (' + local_llm.model + ')' if privacy_mode else 'Cloud Model (' + llm.model_name + ')'}", flush=True)
-        print(final_answer, flush=True)
-        print("============================================\n", flush=True)
+        try:
+            print("\n=============== LLM RESPONSE ===============", flush=True)
+            print(f"ANSWERED BY   : {'Local Ollama (' + local_llm.model + ')' if privacy_mode else 'Cloud Model (' + llm.model_name + ')'}", flush=True)
+            # Encode and decode using backslashreplace or ignore to avoid terminal output crash
+            safe_ans = final_answer.encode('ascii', errors='backslashreplace').decode('ascii')
+            print(safe_ans, flush=True)
+            print("============================================\n", flush=True)
+        except Exception:
+            pass
         
         return {
             "answer": final_answer,
@@ -454,11 +685,17 @@ workflow = StateGraph(AgentState)
 
 workflow.add_node("condense", condense_query_node)
 workflow.add_node("retrieve", retrieve_docs_node)
+workflow.add_node("ambiguity_detection", ambiguity_detection_node)
+workflow.add_node("clarification_generation", clarification_generation_node)
+workflow.add_node("refinement", refinement_node)
 workflow.add_node("generate", generate_answer_node)
 
 workflow.add_edge(START, "condense")
 workflow.add_edge("condense", "retrieve")
-workflow.add_edge("retrieve", "generate")
+workflow.add_edge("retrieve", "ambiguity_detection")
+workflow.add_edge("ambiguity_detection", "clarification_generation")
+workflow.add_edge("clarification_generation", "refinement")
+workflow.add_edge("refinement", "generate")
 workflow.add_edge("generate", END)
 
 memory = MemorySaver()
@@ -469,15 +706,21 @@ async def ask_question(
     question,
     user_id,
     privacy_mode=False,
-    session_id="default"
+    session_id="default",
+    domain=""
 ):
 
-    print("\n================ FUNCTION STARTED ================", flush=True)
-    print(f"QUESTION      : {question}", flush=True)
-    print(f"USER ID       : {user_id}", flush=True)
-    print(f"PRIVACY MODE  : {privacy_mode}", flush=True)
-    print(f"SESSION ID    : {session_id}", flush=True)
-    print("==================================================", flush=True)
+    try:
+        print("\n================ FUNCTION STARTED ================", flush=True)
+        safe_q = question.encode('ascii', errors='backslashreplace').decode('ascii')
+        print(f"QUESTION      : {safe_q}", flush=True)
+        print(f"USER ID       : {user_id}", flush=True)
+        print(f"PRIVACY MODE  : {privacy_mode}", flush=True)
+        print(f"SESSION ID    : {session_id}", flush=True)
+        print(f"DOMAIN        : {domain}", flush=True)
+        print("==================================================", flush=True)
+    except Exception:
+        pass
 
     config = {"configurable": {"thread_id": f"{user_id}:{session_id}"}}
 
@@ -488,19 +731,26 @@ async def ask_question(
                 "question": question,
                 "privacy_mode": privacy_mode,
                 "user_id": user_id,
+                "domain": domain,
+                "ambiguities": [],
+                "clarification_questions": [],
+                "refined_requirement": ""
             },
             config=config
         )
         
         valid_docs = result.get("documents", [])
-        final_answer = result.get("answer", "I could not find this in the uploaded documents.")
+        final_answer = result.get("answer", "Failed to refine business requirements.")
         
         return {
             "answer": final_answer,
             "sources": [
                 doc.metadata
                 for doc in valid_docs
-            ]
+            ],
+            "ambiguities": result.get("ambiguities", []),
+            "clarification_questions": result.get("clarification_questions", []),
+            "refined_requirement": result.get("refined_requirement", "")
         }
 
     except Exception as e:

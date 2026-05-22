@@ -7,5 +7,6 @@ class TextRequest(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
+    domain: str = ""
     session_id: str = "default"
     privacy_mode: bool = False
