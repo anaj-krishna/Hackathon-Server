@@ -480,6 +480,14 @@ async def retrieve_docs_node(state: AgentState):
                 break
             context += doc.page_content + "\n\n"
             valid_docs.append(doc)
+            print("\n=============== RETRIEVED CHUNKS ===============", flush=True)
+            print(f"Total chunks retrieved: {len(valid_docs)}", flush=True)
+            for i, doc in enumerate(valid_docs):
+                print(f"\n--- Chunk {i + 1} ---", flush=True)
+                print(f"Metadata : {doc.metadata}", flush=True)
+                safe_content = doc.page_content.encode('ascii', errors='backslashreplace').decode('ascii')
+                print(f"Content  :\n{safe_content}", flush=True)
+            print("================================================\n", flush=True)
         
     return {"context": context, "documents": valid_docs}
 
